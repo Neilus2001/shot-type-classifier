@@ -40,7 +40,8 @@ import tempfile
 import xml.etree.ElementTree as ET
 from urllib.parse import quote, unquote, urlparse
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif", ".tga", ".psd"}
+# Only JPEGs are treated as candidates, on the timeline and in the folder.
+IMAGE_EXTS = {".jpg", ".jpeg"}
 
 
 # --------------------------------------------------------------------------- #
@@ -193,9 +194,11 @@ class Timeline:
         return text(clip, "name") or os.path.basename(self.clip_path(clip) or "?")
 
     def is_still(self, clip):
-        if text(clip, "stillframe", "").upper() == "TRUE":
-            return True
+        """A candidate image: a JPEG still. Other stills (PNG, titles, ...) are left alone."""
         return is_image_path(self.clip_path(clip))
+
+    def is_any_still(self, clip):
+        return self.is_still(clip) or text(clip, "stillframe", "").upper() == "TRUE"
 
     def resolve(self, track):
         """Return [(clip, start, end)] for a track, filling in -1 values next to transitions."""
@@ -537,7 +540,7 @@ class Previewer:
             for clip, st, en in sorted(self.tl.resolve(track), key=lambda c: c[1]):
                 if en <= start_f or st >= end_f:
                     continue
-                if want_still is False and self.tl.is_still(clip):
+                if want_still is False and self.tl.is_any_still(clip):
                     continue
                 p = self.tl.clip_path(clip)
                 if not p or not os.path.exists(p):
@@ -788,7 +791,7 @@ def main():
 
     slots = tl.find_slots(window)
     if not slots:
-        die("No still images found on the timeline" + (" in that window." if window else "."))
+        die("No .jpg images found on the timeline" + (" in that window." if window else "."))
 
     with tempfile.TemporaryDirectory(prefix="pick_image_") as work:
         pv = Previewer(tl, args.movie, args.movie_offset, args.preroll, args.postroll, work)

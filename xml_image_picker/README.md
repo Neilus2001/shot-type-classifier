@@ -1,5 +1,7 @@
 # pick_image.py — audition stills on a Premiere XML timeline
 
+Only JPEGs (`.jpg` / `.jpeg`) are considered, both on the timeline and in the folder.
+
 Plays each alternate image cut into the movie, lets you pick one (or one from a folder),
 asks how long it should stay on screen, and writes it to V1 in a new XML.
 

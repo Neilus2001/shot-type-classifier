@@ -79,7 +79,7 @@ def pathurl_to_path(url):
     # Windows: file://localhost/C%3a/foo -> /C:/foo -> C:/foo
     if re.match(r"^/[A-Za-z]:", p):
         p = p[1:]
-    return p
+    return os.path.normpath(p)  # Premiere sometimes writes "Downloads//folder"
 
 
 def path_to_pathurl(path):
@@ -121,7 +121,7 @@ def has_audio(path):
 # --------------------------------------------------------------------------- #
 
 class Timeline:
-    def __init__(self, xml_path):
+    def __init__(self, xml_path, target_track=1):
         self.xml_path = xml_path
         self.tree = ET.parse(xml_path)
         self.root = self.tree.getroot()
@@ -146,6 +146,9 @@ class Timeline:
         self.audio_tracks = self.seq.findall("media/audio/track")
         if not self.video_tracks:
             die("Sequence has no video tracks.")
+        if not 1 <= target_track <= len(self.video_tracks):
+            die(f"--track {target_track}: the sequence only has V1-V{len(self.video_tracks)}.")
+        self.target = target_track - 1           # where picks are written (V1 by default)
 
         # Full <file> definitions by id (Premiere writes the full one once, then <file id="x"/>).
         self.files = {}
@@ -257,7 +260,37 @@ class Timeline:
                 cur, cur_end = [s], s["end"]
         if cur:
             slots.append(self._slot(cur))
-        return slots
+        return self._merge_pieces(slots)
+
+    def _merge_pieces(self, slots):
+        """A shot cut into back-to-back pieces (same images each time) is one decision, not several."""
+        merged = []
+        for sl in slots:
+            if merged and merged[-1]["end"] == sl["start"] and self._paths(merged[-1]) == self._paths(sl):
+                merged[-1] = self._slot(merged[-1]["candidates"] + sl["candidates"])
+            else:
+                merged.append(sl)
+        return merged
+
+    def _paths(self, slot):
+        return {self.clip_path(c["clip"]) for c in slot["candidates"]}
+
+    def would_cut(self, start, end, ignore):
+        """Clips already on the target track in [start, end) that the pick will cut or remove."""
+        return [f"V{self.target + 1} '{self.clip_name(clip)}'"
+                for clip, st, en in self.resolve(self.video_tracks[self.target])
+                if st < end and en > start and clip not in ignore]
+
+    def covering(self, start, end, ignore):
+        """Non-candidate video above the target track in [start, end) that would hide the pick."""
+        found = []
+        for ti, track in enumerate(self.video_tracks[self.target + 1:], self.target + 2):
+            for clip, st, en in self.resolve(track):
+                if st < end and en > start and clip not in ignore and text(clip, "enabled", "TRUE") == "TRUE":
+                    name = self.clip_name(clip)
+                    if "adjustment layer" not in name.lower():
+                        found.append(f"V{ti} '{name}'")
+        return found
 
     def _slot(self, group):
         group.sort(key=lambda s: (-s["track"], s["start"]))  # top track first (what's visible)
@@ -267,10 +300,10 @@ class Timeline:
 
     # ---- the edit -------------------------------------------------------- #
     def commit(self, slot, choice, duration, remove_others=True, scale_mode="fit"):
-        """Overwrite V1 from slot start for `duration` frames with the chosen image."""
+        """Overwrite the target track (V1 by default) from slot start for `duration` frames."""
         s = slot["start"]
         e = s + duration
-        v1 = self.video_tracks[0]
+        v1 = self.video_tracks[self.target]
 
         # 1. Build the new clipitem.
         if choice["kind"] == "timeline":
@@ -319,7 +352,7 @@ class Timeline:
                     removed_ids.add(c["clip"].get("id"))
                     track.remove(c["clip"])
 
-        # 3. Overwrite [s, e) on V1.
+        # 3. Overwrite [s, e) on the target track.
         for clip, st, en in self.resolve(v1):
             if en <= s or st >= e:
                 continue
@@ -333,6 +366,10 @@ class Timeline:
                 for child in right.findall("link"):
                     right.remove(child)
                 self._dedupe_file(right)
+                nested = right.find("sequence")
+                if nested is not None:
+                    for child in list(nested):
+                        nested.remove(child)
                 set_text(right, "start", e)
                 set_text(right, "end", en)
                 set_text(right, "in", cin + (e - st))
@@ -627,6 +664,27 @@ def list_folder(folder):
                   if is_image_path(f) and not f.startswith("."))
 
 
+def load_cast(folder):
+    """Character names per still from the face-naming step (<stills>/cast_labels.json), keyed by filename."""
+    if not folder:
+        return {}
+    p = os.path.join(folder, "cast_labels.json")
+    if not os.path.exists(p):
+        return {}
+    try:
+        import json
+        with open(p, encoding="utf-8") as fh:
+            stills = json.load(fh).get("stills", {})
+    except (ValueError, OSError) as e:
+        print(f"  (couldn't read {p}: {e})")
+        return {}
+    cast = {}
+    for fname, people in stills.items():
+        names = [x["name"] if isinstance(x, dict) else str(x) for x in people]
+        cast[os.path.basename(fname).lower()] = names
+    return cast
+
+
 def ask(prompt):
     try:
         return input(prompt).strip()
@@ -635,110 +693,153 @@ def ask(prompt):
         sys.exit(0)
 
 
-def describe_slot(tl, i, slot):
-    s, e = slot["start"], slot["end"]
-    print(f"\n=== Slot {i}: {tl.tc(s)} -> {tl.tc(e)}  ({tl.secs(e - s):.2f}s, {e - s} frames) ===")
+class Session:
+    def __init__(self, tl, pv, args):
+        self.tl, self.pv, self.args = tl, pv, args
+        self.folder_imgs = list_folder(args.folder)
+        self.cast = load_cast(args.folder)
+        self.shown_folder = []        # folder images from the last `f` listing, for `pf`
 
+    def who(self, path):
+        names = self.cast.get(os.path.basename(path or "").lower())
+        return f"  — {', '.join(names)}" if names else ""
 
-def run_slot(tl, pv, slot, folder, scale_mode, remove_others):
-    cur_dur = slot["end"] - slot["start"]
-    options = []
-    for c in slot["candidates"]:
-        options.append({"kind": "timeline", "clip": c["clip"], "path": tl.clip_path(c["clip"]),
-                        "label": f"{tl.clip_name(c['clip'])}  [V{c['track'] + 1}]"})
-    folder_imgs = list_folder(folder)
-    folder_opts = [{"kind": "folder", "path": p, "label": os.path.basename(p)} for p in folder_imgs]
+    # ---- one slot ------------------------------------------------------- #
+    def options_for(self, slot):
+        opts, seen = [], set()
+        for c in slot["candidates"]:              # top track first; one entry per image file
+            p = self.tl.clip_path(c["clip"])
+            if p in seen:
+                continue
+            seen.add(p)
+            off = "" if text(c["clip"], "enabled", "TRUE") == "TRUE" else " [disabled]"
+            opts.append({"kind": "timeline", "clip": c["clip"], "path": p,
+                         "label": f"{os.path.basename(p)}  [V{c['track'] + 1}]{off}"})
+        return opts
 
-    def show():
-        print("\nCandidates on the timeline:")
-        for n, o in enumerate(options, 1):
-            missing = "" if o["path"] and os.path.exists(o["path"]) else "   (MEDIA NOT FOUND)"
-            print(f"  {n:>3}. {o['label']}{missing}")
-        if folder_opts:
-            print(f"Folder images ({folder}):")
-            for n, o in enumerate(folder_opts, 1):
-                print(f"  F{n:<3} {o['label']}")
-        print("\nCommands:  p 2   preview #2        pa  preview all timeline candidates in a row")
-        print("           p F3  preview folder #3 pf  preview all folder images")
-        print("           s 2   choose #2         s F3 choose folder image #3")
-        print("           l     list again        k   skip this slot      q  save & quit")
+    def show(self, n, total, slot, opts):
+        tl = self.tl
+        s, e = slot["start"], slot["end"]
+        print(f"\n=== Slot {n} of {total}: {tl.tc(s)} -> {tl.tc(e)}  ({tl.secs(e - s):.2f}s) ===")
+        for i, o in enumerate(opts, 1):
+            missing = "" if o["path"] and os.path.exists(o["path"]) else "   (FILE NOT FOUND)"
+            print(f"  {i:>3}. {o['label']}{self.who(o['path'])}{missing}")
+        if self.folder_imgs:
+            labelled = sum(1 for p in self.folder_imgs if self.who(p))
+            extra = f", {labelled} with cast names" if self.cast else ""
+            print(f"  + folder: {len(self.folder_imgs)} images{extra}.  f = list all,  f eve = filter by name/character")
+        print("  p 2 / p F3 preview   pa preview all   s 2 / s F3 choose   n next   b back   g 12 go to slot   q save & quit")
 
-    def get(token):
+    def list_folder_matches(self, query):
+        q = (query or "").lower()
+        hits = [(i, p) for i, p in enumerate(self.folder_imgs, 1)
+                if not q or q in os.path.basename(p).lower() or q in self.who(p).lower()]
+        self.shown_folder = [p for _, p in hits]
+        if not hits:
+            print("  No folder images match.")
+        for i, p in hits:
+            print(f"  F{i:<4} {os.path.basename(p)}{self.who(p)}")
+
+    def get(self, token, opts):
         token = token.upper()
-        if token.startswith("F"):
-            idx, pool = token[1:], folder_opts
-        else:
-            idx, pool = token, options
+        pool, idx = (self.folder_imgs, token[1:]) if token.startswith("F") else (opts, token)
         if not idx.isdigit() or not (1 <= int(idx) <= len(pool)):
             return None
-        return pool[int(idx) - 1]
+        o = pool[int(idx) - 1]
+        if token.startswith("F"):
+            return {"kind": "folder", "path": o, "label": os.path.basename(o)}
+        return o
 
-    def preview(o, dur):
+    def preview(self, slot, o, dur):
         if not o["path"] or not os.path.exists(o["path"]):
             print(f"  Can't preview {o['label']}: image file not found on this machine.")
             return
-        print(f"  Rendering preview of {o['label']} ...")
-        out = pv.render(slot, o["path"], dur)
+        print(f"  Rendering {o['label']} ...")
+        out = self.pv.render(slot, o["path"], dur)
         if out:
-            print("  Playing (close the window or press q / Esc to stop).")
-            pv.play(out, o["label"])
+            print("  Playing (q or Esc closes the window).")
+            self.pv.play(out, o["label"])
 
-    show()
-    while True:
-        cmd = ask("\n> ").split()
-        if not cmd:
-            continue
-        op, arg = cmd[0].lower(), (cmd[1] if len(cmd) > 1 else None)
-        if op == "q":
-            return "quit"
-        if op == "k":
-            return "skip"
-        if op == "l":
-            show()
-        elif op == "pa":
-            for o in options:
-                preview(o, cur_dur)
-        elif op == "pf":
-            if not folder_opts:
-                print("  No folder images. Start the script with --folder <path>.")
-            for o in folder_opts:
-                preview(o, cur_dur)
-        elif op == "p" and arg:
-            o = get(arg)
-            preview(o, cur_dur) if o else print("  No such option.")
-        elif op == "s" and arg:
-            o = get(arg)
-            if not o:
-                print("  No such option.")
+    def ask_duration(self, o, cur):
+        tl = self.tl
+        while True:
+            ans = ask(f"  How long should '{o['label']}' stay on screen? "
+                      f"[Enter = {tl.secs(cur):.2f}s]  (4, 4.5s, 96f or 00:00:04:00): ")
+            if not ans:
+                return cur
+            try:
+                d = tl.parse_duration(ans)
+                if d > 0:
+                    return d
+            except ValueError:
+                pass
+            print("  Didn't understand that duration.")
+
+    def run_slot(self, n, total, slot):
+        """Returns 'done', 'next', 'back', 'quit' or ('goto', index)."""
+        tl = self.tl
+        opts = self.options_for(slot)
+        cur = slot["end"] - slot["start"]
+        self.show(n, total, slot, opts)
+        while True:
+            cmd = ask("> ").split(None, 1)
+            if not cmd:
                 continue
-            # --- how long on screen? ---
-            while True:
-                ans = ask(f"  How long should '{o['label']}' stay on screen? "
-                          f"[Enter = {tl.secs(cur_dur):.2f}s / {cur_dur}f]  (e.g. 4, 4.5s, 96f, 00:00:04:00): ")
-                if not ans:
-                    dur = cur_dur
-                    break
-                try:
-                    dur = tl.parse_duration(ans)
-                    if dur <= 0:
-                        raise ValueError
-                    break
-                except ValueError:
-                    print("  Didn't understand that duration.")
-            print(f"  -> {tl.secs(dur):.2f}s ({dur} frames), {tl.tc(slot['start'])} to {tl.tc(slot['start'] + dur)} on V1")
-            if dur > cur_dur:
-                print(f"  Note: that's longer than the slot; it will overwrite {dur - cur_dur} more frames of V1.")
-            if ask("  Preview the final result first? [Y/n] ").lower() != "n":
-                preview(o, dur)
-            if ask("  Commit this to V1? [Y/n] ").lower() == "n":
-                show()
-                continue
-            if o["kind"] == "folder" and scale_mode != "none":
-                print(f"  (folder image will be scaled to {scale_mode} the {tl.width}x{tl.height} frame)")
-            tl.commit(slot, o, dur, remove_others=remove_others, scale_mode=scale_mode)
-            return "done"
-        else:
-            print("  Unknown command. Type l to list options.")
+            op, arg = cmd[0].lower(), (cmd[1].strip() if len(cmd) > 1 else None)
+            if op == "q":
+                return "quit"
+            if op in ("n", "k"):
+                return "next"
+            if op == "b":
+                return "back"
+            if op == "g" and arg and arg.isdigit():
+                return ("goto", int(arg) - 1)
+            if op == "l":
+                self.show(n, total, slot, opts)
+            elif op == "f":
+                self.list_folder_matches(arg)
+            elif op == "pa":
+                for o in opts:
+                    self.preview(slot, o, cur)
+            elif op == "pf":
+                pool = self.shown_folder or self.folder_imgs
+                if len(pool) > 10 and ask(f"  Preview all {len(pool)}? Use `f <name>` to narrow first. [y/N] ").lower() != "y":
+                    continue
+                for p in pool:
+                    self.preview(slot, {"path": p, "label": os.path.basename(p)}, cur)
+            elif op == "p" and arg:
+                o = self.get(arg, opts)
+                self.preview(slot, o, cur) if o else print("  No such option.")
+            elif op == "s" and arg:
+                o = self.get(arg, opts)
+                if not o:
+                    print("  No such option.")
+                    continue
+                dur = self.ask_duration(o, cur)
+                s = slot["start"]
+                vt = f"V{tl.target + 1}"
+                print(f"  -> {tl.secs(dur):.2f}s ({dur} frames), {tl.tc(s)} to {tl.tc(s + dur)} on {vt}")
+                if dur > cur:
+                    print(f"  Note: longer than the slot; overwrites {dur - cur} more frames of {vt}.")
+                cover = tl.covering(s, s + dur, {c["clip"] for c in slot["candidates"]})
+                if cover:
+                    print(f"  HEADS UP: these are above {vt} here and will cover the image (see --track):")
+                    for c in cover[:6]:
+                        print(f"     {c}")
+                cut = tl.would_cut(s, s + dur, {c["clip"] for c in slot["candidates"]})
+                if cut:
+                    print(f"  This will cut/shorten what's already on {vt} here:")
+                    for c in cut[:6]:
+                        print(f"     {c}")
+                if ask("  Preview the final result first? [y/N] ").lower() == "y":
+                    self.preview(slot, o, dur)
+                if ask(f"  Commit to {vt}? [Y/n] ").lower() == "n":
+                    self.show(n, total, slot, opts)
+                    continue
+                tl.commit(slot, o, dur, remove_others=not self.args.keep_others, scale_mode=self.args.scale)
+                return "done"
+            else:
+                print("  Unknown command (l lists the options again).")
 
 
 def parse_time_arg(tl, s):
@@ -754,7 +855,7 @@ def main():
     ap.add_argument("--movie", help="Reference export of the sequence (mp4/mov) used for previews")
     ap.add_argument("--movie-offset", type=float, default=0.0,
                     help="Seconds into the sequence where the reference movie starts (if you exported a range)")
-    ap.add_argument("--folder", help="Folder of alternate images to choose from")
+    ap.add_argument("--folder", help="Folder of alternate images (cast_labels.json in it is used for character names)")
     ap.add_argument("--out", help="Output XML path (default: <input>_picked.xml)")
     ap.add_argument("--start", help="Only look at images in this window: start (seconds, 300f, or timecode)")
     ap.add_argument("--end", help="Window end (use with --start)")
@@ -762,6 +863,11 @@ def main():
     ap.add_argument("--postroll", type=float, default=3.0, help="Seconds to play after the image (default 3)")
     ap.add_argument("--scale", choices=["fit", "fill", "none"], default="fit",
                     help="How to scale a folder image to the frame (default fit)")
+    ap.add_argument("--track", type=int, default=1,
+                    help="Video track the picks are written to (default 1 = V1). Use a track above your footage "
+                         "if footage on higher tracks would cover V1.")
+    ap.add_argument("--include-single", action="store_true",
+                    help="Also stop at images with no alternate on the timeline (to swap in a folder image)")
     ap.add_argument("--keep-others", action="store_true",
                     help="Leave the unchosen candidates on their tracks instead of removing them")
     args = ap.parse_args()
@@ -772,7 +878,7 @@ def main():
     if args.movie and not os.path.exists(args.movie):
         die(f"Movie not found: {args.movie}")
 
-    tl = Timeline(args.xml)
+    tl = Timeline(args.xml, args.track)
     out_path = args.out or os.path.splitext(args.xml)[0] + "_picked.xml"
     if os.path.abspath(out_path) == os.path.abspath(args.xml):
         die("--out must be different from the input XML (the original is never overwritten).")
@@ -784,44 +890,51 @@ def main():
         window = (parse_time_arg(tl, args.start), parse_time_arg(tl, args.end))
 
     print(f"Sequence: {text(tl.seq, 'name', '?')}  {tl.width}x{tl.height} @ {tl.fps:.3f} fps, "
-          f"{len(tl.video_tracks)} video tracks")
+          f"{len(tl.video_tracks)} video tracks. Picks go on V{args.track}.")
     if not args.movie:
-        print("No --movie given: previews will be rebuilt from V1/A1 source media (or black if not found).\n"
+        print("No --movie given: previews are rebuilt from V1/A1 source media (or black if not found).\n"
               "For accurate previews export the sequence (any small H.264) and pass it with --movie.")
 
-    slots = tl.find_slots(window)
+    min_len = int(round(0.25 * tl.fps))
+
+    def scan():
+        """Slots worth a decision: not a sliver, and (unless --include-single) more than one image."""
+        return [sl for sl in tl.find_slots(window)
+                if sl["end"] - sl["start"] >= min_len and (args.include_single or len(tl._paths(sl)) > 1)]
+
+    slots = scan()
     if not slots:
-        die("No .jpg images found on the timeline" + (" in that window." if window else "."))
+        die("No .jpg choices found on the timeline" + (" in that window" if window else "")
+            + ("." if args.include_single else ". (Use --include-single to also see lone images.)"))
 
     with tempfile.TemporaryDirectory(prefix="pick_image_") as work:
         pv = Previewer(tl, args.movie, args.movie_offset, args.preroll, args.postroll, work)
-        changed = False
-        i = 0
-        while i < len(slots):
-            print(f"\nFound {len(slots)} slot(s) with images:")
-            for n, sl in enumerate(slots, 1):
-                names = ", ".join(tl.clip_name(c["clip"]) for c in sl["candidates"])
-                print(f"  {n}. {tl.tc(sl['start'])} -> {tl.tc(sl['end'])}  ({len(sl['candidates'])} image(s): {names})")
-            slot = slots[i]
-            describe_slot(tl, i + 1, slot)
-            res = run_slot(tl, pv, slot, args.folder, args.scale, not args.keep_others)
+        sess = Session(tl, pv, args)
+        if sess.cast:
+            print(f"Cast labels loaded for {len(sess.cast)} stills.")
+        print(f"{len(slots)} slot(s) to decide" + ("." if args.include_single else
+              " (places with 2+ different .jpg images; --include-single adds lone images)."))
+        changed, i = 0, 0
+        while 0 <= i < len(slots):
+            res = sess.run_slot(i + 1, len(slots), slots[i])
             if res == "done":
-                changed = True
+                changed += 1
                 tl.write(out_path)
-                print(f"\n  Saved -> {out_path}")
-                # Re-scan: the edit can merge/split later slots; keep going from the next one in time.
-                done_start = slot["start"]
-                slots = [sl for sl in tl.find_slots(window) if sl["start"] > done_start]
-                i = 0
-                if not slots:
-                    break
-                continue
-            if res == "quit":
+                print(f"  Saved -> {out_path}")
+                done_start = slots[i]["start"]
+                slots = scan()                    # the edit changes the timeline; re-scan
+                i = next((k for k, sl in enumerate(slots) if sl["start"] > done_start), len(slots))
+            elif res == "quit":
                 break
-            i += 1
+            elif res == "back":
+                i = max(0, i - 1)
+            elif isinstance(res, tuple):
+                i = min(max(0, res[1]), len(slots) - 1)
+            else:
+                i += 1
 
     if changed:
-        print(f"\nDone. Import into Premiere: File > Import > {out_path}")
+        print(f"\nDone: {changed} pick(s). Import into Premiere: File > Import > {out_path}")
     else:
         print("\nNo changes made.")
 

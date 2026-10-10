@@ -27,7 +27,19 @@ to one track (V1 by default) in a **new** XML. Your original XML is never change
    close the browser tab, press Ctrl+C in the Terminal window, and import the `_picked.xml`
    in Premiere (File > Import).
 
-Keyboard: Space play/pause · 1–9 pick a timeline image · Enter use it · ↑/↓ previous/next place · / search.
+### Decided places, coming back later, inserting new images
+- Decided places stay in the left list with a green ✓ and the image you chose. Click one to
+  re-watch it or change your mind ("Change to this image"). "Next undecided" jumps ahead;
+  "Hide decided places" shortens the list.
+- Close it any time. Run it again on the same XML and it **resumes** from `_picked.xml`,
+  ✓ marks included (they're kept in `<name>_picked.picks.json`). `--fresh` starts over.
+- **＋ Insert an image** puts an image where there was none: scrub the movie, press
+  "Use playhead" (or type a timecode), click an image, set how long, "Use this image".
+- **Images that aren't in your folder**: drag .jpg files onto the page or click
+  "Add image file…". They're copied into a `Picker added images` folder next to your XML,
+  so Premiere can find them.
+
+Keyboard: N next undecided · Space play/pause · 1–9 pick a timeline image · Enter use it · ↑/↓ previous/next place · / search.
 
 Command line instead of double-click:
 ```

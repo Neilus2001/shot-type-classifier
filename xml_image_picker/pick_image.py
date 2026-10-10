@@ -321,7 +321,8 @@ class Timeline:
                 new.remove(new.find("file"))
                 new.insert(self._file_index(new), copy.deepcopy(self.files[fid]))
         else:
-            template = slot["candidates"][0]["clip"]
+            # Copy an existing candidate's settings; at a brand-new place there is none, so start blank.
+            template = slot["candidates"][0]["clip"] if slot["candidates"] else self._blank_clip()
             new = copy.deepcopy(template)
             for tag in ("file", "masterclipid", "link", "filter"):
                 for child in new.findall(tag):
@@ -410,6 +411,18 @@ class Timeline:
         # 5. Clean dangling <link>s and make sure every file id is defined once, in full.
         self._drop_links(removed_ids)
         self._normalize_files()
+
+    def _blank_clip(self):
+        c = ET.Element("clipitem", {"id": "blank"})
+        ET.SubElement(c, "name").text = "image"
+        ET.SubElement(c, "enabled").text = "TRUE"
+        ET.SubElement(c, "duration").text = str(self.timebase * 3600)
+        r = ET.SubElement(c, "rate")
+        ET.SubElement(r, "timebase").text = str(self.timebase)
+        ET.SubElement(r, "ntsc").text = "TRUE" if self.ntsc else "FALSE"
+        for tag in ("start", "end", "in", "out"):
+            ET.SubElement(c, tag).text = "0"
+        return c
 
     def _file_index(self, clip):
         for i, child in enumerate(list(clip)):

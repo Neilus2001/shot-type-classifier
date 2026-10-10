@@ -100,14 +100,21 @@ def require_tools():
 
 
 def run(cmd):
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError:  # ffmpeg/ffprobe not installed
+        return subprocess.CompletedProcess(cmd, 127, "", f"{cmd[0]} not found")
 
 
 def image_size(path):
     r = run(["ffprobe", "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path])
     m = re.search(r"(\d+)x(\d+)", r.stdout)
-    return (int(m.group(1)), int(m.group(2))) if m else None
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    r = run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", path])  # macOS built-in
+    w, h = re.search(r"pixelWidth: (\d+)", r.stdout), re.search(r"pixelHeight: (\d+)", r.stdout)
+    return (int(w.group(1)), int(h.group(1))) if w and h else None
 
 
 def has_audio(path):

@@ -8,45 +8,41 @@ and a cast-matched still on V7), it plays the movie with each one cut in, lets y
 to one track (V1 by default) in a **new** XML. Your original XML is never changed.
 
 ## Setup (once, on your Mac)
-- Python 3 (you already have it: the FirstPass tools use it)
-- ffmpeg: `brew install ffmpeg`
-- Get the script: download `pick_image.py` from the `add-xml-image-picker` branch of
-  `neilus2001/shot-type-classifier`, e.g. into `~/Downloads/Claude/FirstPass/`
+- Download the three files from the `add-xml-image-picker` branch into one folder
+  (e.g. `~/Downloads/Claude/FirstPass/ImagePicker/`): `pick_gui.py`, `pick_image.py`, `Pick Images.command`
+- Optional but recommended: `brew install ffmpeg` (faster thumbnails)
+- First run only: right-click `Pick Images.command` > Open > Open (macOS asks once because it was downloaded)
 
-## Run
+## Run (visual version)
+1. In Premiere, export the sequence: File > Export > Media, **H.264 .mp4**, small/720p is fine.
+   This is what you'll see and hear in the picker.
+2. Double-click **Pick Images.command** and drag in, when asked: the XML, the .mp4, the
+   stills folder, and type the track for picks (7 for the Eve's Bayou test sequence).
+3. Your browser opens the picker:
+   - **left**: every place where 2+ different .jpg images compete
+   - **middle**: the movie with sound, playing 3s before → the image → 3s after
+   - **right**: the candidates on the timeline, plus your folder (search by file name or character)
+   - click an image to watch it in context, set **On screen for**, click **Use this image**
+4. Each pick saves `<xml name>_picked.xml` immediately. **Undo last pick** works. When done,
+   close the browser tab, press Ctrl+C in the Terminal window, and import the `_picked.xml`
+   in Premiere (File > Import).
+
+Keyboard: Space play/pause · 1–9 pick a timeline image · Enter use it · ↑/↓ previous/next place · / search.
+
+Command line instead of double-click:
 ```
-cd ~/Downloads/Claude/FirstPass
-python3 pick_image.py "/path/to/Eves_Bayou_XMLtest.xml" \
-    --movie "/path/to/EvesBayou_reference.mp4" \
-    --folder ~/Downloads/EvesBayou_stills
+python3 pick_gui.py timeline.xml --movie ref.mp4 --folder ~/Downloads/EvesBayou_stills --track 7
 ```
-- `--movie`: File > Export > Media of the sequence, H.264, low resolution. This is what you
-  see in the previews. Without it, previews are rebuilt from V1/A1 only (or black).
-- `--folder`: replacement images. If the folder has `cast_labels.json` (written by the
-  FirstPass face-naming step), the characters on screen are shown next to each still,
-  and `f mozelle` filters the folder by character.
-
-Output: `<input>_picked.xml`, saved after every pick. Import it with **File > Import**.
-
-## Commands
-| type | does |
-|---|---|
-| `p 1` / `p F12` | play the movie with candidate 1 / folder image 12 cut in |
-| `pa` | play every candidate for this slot in a row |
-| `f` / `f eve` | list the folder / only images matching a filename or character |
-| `pf` | play every image from the last `f` listing |
-| `s 1` / `s F12` | choose it → asks how long on screen (`4`, `4.5s`, `96f`, `00:00:04:00`, Enter = keep) → commit |
-| `n` / `b` / `g 40` | next slot / back / jump to slot 40 |
-| `q` | save and quit (you can resume later by running it on the `_picked.xml`) |
+(`pick_image.py` is the older terminal-only version; the visual one uses it under the hood.)
 
 ## Which track to write to
 Picks overwrite that stretch of the target track and remove the other candidates.
-Before you confirm, it tells you:
+Before you confirm, it shows (in red under the button):
 - **what it will cut** on the target track, and
 - **what sits above** the target track and would cover the image.
 
 For the Eve's Bayou test sequence: V1 is covered by footage on V3/V5 in 14 of 172 slots;
-V7 is never covered and only cuts one Graphic. Use `--track 7` to write picks there instead.
+V7 is never covered and only cuts one Graphic. Pick the track in the top-right menu (or `--track 7`).
 
 ## Other options
 `--include-single` also stops at lone images (to swap in a folder image) ·

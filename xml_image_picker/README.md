@@ -8,8 +8,10 @@ and a cast-matched still on V7), it plays the movie with each one cut in, lets y
 to one track (V1 by default) in a **new** XML. Your original XML is never changed.
 
 ## Setup (once, on your Mac)
-- Download the three files from the `add-xml-image-picker` branch into one folder
-  (e.g. `~/Downloads/Claude/FirstPass/ImagePicker/`): `pick_gui.py`, `pick_image.py`, `Pick Images.command`
+- Install or update with one paste in Terminal (puts the files in `~/Downloads/Claude/FirstPass/ImagePicker/`):
+  ```
+  mkdir -p ~/Downloads/Claude/FirstPass/ImagePicker && cd ~/Downloads/Claude/FirstPass/ImagePicker && for f in pick_gui.py pick_image.py "Pick Images.command" "Eves Bayou Picker.command"; do curl -fsSL -o "$f" "https://raw.githubusercontent.com/Neilus2001/shot-type-classifier/master/xml_image_picker/${f// /%20}"; done && chmod +x *.command
+  ```
 - Optional but recommended: `brew install ffmpeg` (faster thumbnails)
 - First run only: right-click `Pick Images.command` > Open > Open (macOS asks once because it was downloaded)
 
